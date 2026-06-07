@@ -1,0 +1,122 @@
+service: vision-moderation
+description: >
+  SLO specification for the Vision Moderation service.
+  The external partner SLA promises 99.5% availability and p95 latency ≤ 500 ms
+  over a rolling hour. Internal SLOs are deliberately stricter to create an
+  error budget buffer before SLA breach.
+
+slos:
+  - name: availability
+    description: >
+      Tied directly to the partner SLA (99.5% availability, refunds on breach).
+      Internal objective is set at 99.7% to provide a ~0.2% error budget buffer
+      before the external SLA threshold is hit.
+    sli: >
+      proportion of HTTP requests to /v1/moderate (sync) and /v1/moderate/batch
+      that return a status code in {200, 201, 204} over a rolling 30-day window.
+      A "bad" request is any response with status 5xx, or any request that times
+      out with no response within 2000 ms. Client errors (4xx) are excluded from
+      the SLI denominator — they do not count as good or bad events.
+    objective: 0.997          # internal; external SLA floor is 0.995
+    rolling_window: 30d
+    partner_sla_floor: 0.995  # refund threshold from contract
+    burn_rate_alerts:
+      - severity: page
+        burn_rate: 14.4       # exhausts 30-day budget in ~2 hours
+        window: 1h
+        description: >
+          Fast burn: service is failing fast enough to exhaust the entire monthly
+          error budget in ~2 hours. Page on-call immediately.
+      - severity: ticket
+        burn_rate: 6          # exhausts 30-day budget in ~5 days
+        window: 6h
+        description: >
+          Slow burn: elevated error rate will exhaust budget within ~5 days if
+          unchecked. Create a P2 ticket for next-business-day investigation.
+      - severity: ticket
+        burn_rate: 3
+        window: 3d
+        description: >
+          Slow creep: low-grade degradation over multiple days. Review in
+          weekly reliability meeting.
+
+  - name: latency_p95_sync
+    description: >
+      p95 latency SLO for the synchronous /v1/moderate endpoint. The 250 ms
+      target is our internal budget; the partner SLA only fires refunds above
+      500 ms, so this SLO provides a 2× internal safety margin.
+    sli: >
+      proportion of requests to /v1/moderate where end-to-end latency
+      (measured from first byte received at the load balancer to last byte of
+      response sent) is strictly less than 250 ms, over a rolling 30-day window.
+      Latency is recorded via histogram buckets in Prometheus
+      (http_request_duration_seconds{endpoint="/v1/moderate",le="0.25"}).
+    objective: 0.95
+    rolling_window: 30d
+    burn_rate_alerts:
+      - severity: page
+        burn_rate: 14.4
+        window: 1h
+        description: >
+          p95 latency burning error budget at 14.4× — likely a runaway inference
+          bottleneck or Redis degradation. Page immediately.
+      - severity: ticket
+        burn_rate: 6
+        window: 6h
+        description: >
+          Sustained moderate latency increase over 6 hours. Investigate replica
+          count, GPU saturation, and Redis p95.
+
+  - name: latency_p99_sync
+    description: >
+      p99 latency SLO for the synchronous endpoint. Tighter than p95 to catch
+      long-tail outliers caused by GC pauses, cold-start replicas, or Redis
+      cache misses.
+    sli: >
+      proportion of requests to /v1/moderate where end-to-end latency is
+      strictly less than 400 ms over a rolling 30-day window.
+      Measured via Prometheus histogram bucket
+      (http_request_duration_seconds{endpoint="/v1/moderate",le="0.4"}).
+    objective: 0.99
+    rolling_window: 30d
+    burn_rate_alerts:
+      - severity: page
+        burn_rate: 14.4
+        window: 1h
+        description: >
+          p99 tail latency is spiking sharply — may indicate a single bad
+          replica or downstream dependency failure. Page on-call.
+      - severity: ticket
+        burn_rate: 3
+        window: 6h
+        description: >
+          p99 tail slowly drifting — check for memory pressure, autoscaling
+          lag, or Redis timeouts accumulating. At 0.99 objective the error
+          budget is small (0.01 = ~7.3 hours/month); even a burn_rate of 3
+          over 6 hours warrants a ticket.
+
+  - name: latency_p95_batch
+    description: >
+      p95 latency SLO for the partner-facing batch endpoint /v1/moderate/batch.
+      Higher budget than sync because partners explicitly tolerate higher latency
+      for throughput. Tied to the partner SLA on the 500 ms floor.
+    sli: >
+      proportion of requests to /v1/moderate/batch where end-to-end latency
+      is strictly less than 400 ms over a rolling 30-day window.
+      Measured via Prometheus histogram bucket
+      (http_request_duration_seconds{endpoint="/v1/moderate/batch",le="0.4"}).
+    objective: 0.95
+    rolling_window: 30d
+    burn_rate_alerts:
+      - severity: page
+        burn_rate: 14.4
+        window: 1h
+        description: >
+          Batch endpoint burning p95 budget rapidly — likely dynamic batching
+          queue backup or GPU saturation. Page on-call.
+      - severity: ticket
+        burn_rate: 6
+        window: 6h
+        description: >
+          Sustained batch latency increase. Investigate batch queue depth,
+          GPU utilization, and max_wait_window tuning.
